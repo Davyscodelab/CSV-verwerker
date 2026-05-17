@@ -25,4 +25,4 @@ python bank_export.py --maand 04/2025 /pad/naar/map  # andere map
 - pandas (`pip install pandas`)
 
 ## Notities
-Ontwikkeld met een handje hulp van Claude (Anthropic).
+Ontwikkeld met in VSCode met behulp van Claude Code.
