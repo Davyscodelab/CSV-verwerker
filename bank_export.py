@@ -11,100 +11,139 @@ Gebruik:
     python bank_export.py /pad/naar/map --maand 04/2025
 """
 
-import pandas as pd
+import os
 import argparse
-import sys
-from pathlib import Path
+import pandas as pd
 from datetime import datetime
-#pandas is een library om data in een tabel te zetten.
-#df staat voor dataframe, dat is de tabel
-KOLOMMEN = ["Datum", "Omschrijving", "Bedrag", "Saldo", "Credit", "Debet"]
+import logging
 
+# -------------------------
+# LOGGING CONFIGURATIE
+# -------------------------
 
-def is_bankbestand(pad: Path) -> bool:
-    """Controleert of een CSV de verwachte bankkolommen heeft."""
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    filename="bank_export.log",
+    filemode="a",
+)
+
+# Optioneel: logging ook naar console
+console = logging.StreamHandler()
+console.setLevel(logging.INFO)
+console.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+logging.getLogger("").addHandler(console)
+
+# -------------------------
+# HULPFUNCTIES
+# -------------------------
+
+def parse_maand_argument(maand_str):
+    """
+    Converteert 'MM/YYYY' naar een datetime object.
+    """
     try:
-        df = pd.read_csv(pad, sep=",", dtype=str, nrows=1)
-        return all(k in df.columns for k in KOLOMMEN)
-    except Exception:
-        return False
+        return datetime.strptime(maand_str, "%m/%Y")
+    except ValueError:
+        logging.error(f"Fout: Ongeldig maandformaat: {maand_str}. Gebruik 'MM/YYYY'.")
+        raise
 
 
-def lees_csv(pad: Path) -> pd.DataFrame:
-    df = pd.read_csv(pad, sep=",", dtype=str)
-    return df[KOLOMMEN].copy()
+def verwerk_csv_bestanden(map_pad, maand_filter):
+    """
+    Leest alle CSV-bestanden in map_pad, filtert op maand_filter, 
+    behoudt kolommen en exporteert naar exports/.
+    """
 
+    logging.info(f"Start verwerking in map: {map_pad}")
 
-def filter_op_maand(df: pd.DataFrame, maand_str: str) -> pd.DataFrame:
-    df = df.copy()
-    df["_datum"] = pd.to_datetime(df["Datum"], format="%d/%m/%Y", errors="coerce")
-    target = pd.to_datetime(maand_str, format="%m/%Y")
-    masker = (df["_datum"].dt.month == target.month) & \
-             (df["_datum"].dt.year  == target.year)
-    return df[masker].drop(columns=["_datum"])
-
-
-def verwerk_bestand(pad: Path, maand_str: str, uitvoer_map: Path) -> None:
-    print(f"\n📄 Verwerken: {pad.name}")
-
-    df = lees_csv(pad)
-    df_gefilterd = filter_op_maand(df, maand_str)
-
-    if df_gefilterd.empty:
-        print(f"   ⚠️  Geen rijen gevonden voor {maand_str} — overgeslagen.")
+    if not os.path.exists(map_pad):
+        logging.error(f"Map bestaat niet: {map_pad}")
         return
 
-    mm, yyyy = maand_str.split("/")
-    uitvoer_naam = f"{pad.stem}_export_{mm}{yyyy}.csv"
-    uitvoer_pad  = uitvoer_map / uitvoer_naam
+    # Exportmap
+    export_map = os.path.join(map_pad, "exports")
+    os.makedirs(export_map, exist_ok=True)
 
-    df_gefilterd.to_csv(uitvoer_pad, index=False, sep=",")
-    print(f"   ✅ {len(df_gefilterd)} rij(en) → {uitvoer_naam}")
+    # Kolommen die behouden worden
+    vereiste_kolommen = ["Datum", "Omschrijving", "Bedrag", "Saldo", "Credit", "Debet"]
+
+    # Alle CSV’s inlezen
+    csv_bestanden = [f for f in os.listdir(map_pad) if f.lower().endswith(".csv")]
+    logging.info(f"Aantal CSV-bestanden gevonden: {len(csv_bestanden)}")
+
+    for bestand in csv_bestanden:
+        pad = os.path.join(map_pad, bestand)
+        logging.info(f"Verwerken: {bestand}")
+
+        try:
+            df = pd.read_csv(pad)
+        except Exception as e:
+            logging.exception(f"Kon bestand niet inlezen: {pad}")
+            continue
+
+        # Check kolommen
+        ontbrekend = [k for k in vereiste_kolommen if k not in df.columns]
+        if ontbrekend:
+            logging.error(f"Ontbrekende kolommen in {bestand}: {ontbrekend}")
+            continue
+
+        # Datum parsing
+        try:
+            df["Datum"] = pd.to_datetime(df["Datum"], dayfirst=True)
+        except Exception:
+            logging.exception(f"Kon 'Datum'-kolom niet converteren in {bestand}")
+            continue
+
+        # Filteren op maand/jaar
+        df_filtered = df[
+            (df["Datum"].dt.month == maand_filter.month)
+            & (df["Datum"].dt.year == maand_filter.year)
+        ]
+
+        logging.info(
+            f"{len(df_filtered)} rijen over na filtering op {maand_filter.strftime('%m/%Y')}"
+        )
+
+        # Exporteren
+        export_bestand = f"{os.path.splitext(bestand)[0]}_export_{maand_filter.strftime('%m%Y')}.csv"
+        export_pad = os.path.join(export_map, export_bestand)
+
+        df_filtered.to_csv(export_pad, index=False)
+        logging.info(f"Export voltooid: {export_bestand}")
+
+    logging.info("Alle bestanden verwerkt.")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="KBC CSV-export verwerker")
-    parser.add_argument("map", nargs="?", default=None, help="Map met invoer-CSV bestanden (standaard: map van het script)")
-    parser.add_argument(
-        "--maand",
-        default=None,
-        help="Maand om te filteren, formaat MM/YYYY (standaard: huidige maand)",
-    )
-    args = parser.parse_args()
-
-    invoer_map = Path(args.map) if args.map else Path(__file__).parent
-    if not invoer_map.is_dir():
-        print(f"❌ Opgegeven pad is geen map: {invoer_map}")
-        sys.exit(1)
-
-    maand_str = args.maand or datetime.now().strftime("%m/%Y")
-
-    uitvoer_map = invoer_map / "exports"
-    uitvoer_map.mkdir(exist_ok=True)
-
-    print(f"📂 Map      : {invoer_map}")
-    print(f"📅 Maand    : {maand_str}")
-    print(f"💾 Exports  : {uitvoer_map}")
-
-    # Alle CSV's in de map — exports-submap automatisch uitgesloten
-    csv_bestanden = [
-        p for p in invoer_map.glob("*.csv")
-        if p.parent == invoer_map and is_bankbestand(p)
-    ]
-
-    if not csv_bestanden:
-        print("\n⚠️  Geen geldige bankbestanden gevonden in de map.")
-        sys.exit(0)
-
-    print(f"\n🔍 {len(csv_bestanden)} bankbestand(en) gevonden.")
-
-    for bestand in sorted(csv_bestanden):
-        verwerk_bestand(bestand, maand_str, uitvoer_map)
-
-    print("\n✅ Klaar! Druk op Enter om af te sluiten.")
-    input()
-
+# -------------------------
+# MAIN SCRIPT
+# -------------------------
 
 if __name__ == "__main__":
-    main()
-    # Als dit script direct uitgevoerd wordt, start dan de hoofdfunctie
+    parser = argparse.ArgumentParser(description="CSV verwerker KBC")
+    parser.add_argument(
+        "--maand",
+        type=str,
+        help="Formaat MM/YYYY. Laat weg voor huidige maand.",
+    )
+    parser.add_argument(
+        "map_pad",
+        type=str,
+        nargs="?",
+        default=".",
+        help="Map waar CSV-bestanden staan (standaard: huidige map)",
+    )
+
+    args = parser.parse_args()
+
+    # Bepaal maand
+    if args.maand:
+        maand_filter = parse_maand_argument(args.maand)
+    else:
+        # Huidige maand
+        maand_filter = datetime.today().replace(day=1)
+        logging.info(
+            f"Geen maand opgegeven — huidige maand wordt gebruikt: {maand_filter.strftime('%m/%Y')}"
+        )
+
+    verwerk_csv_bestanden(args.map_pad, maand_filter)
